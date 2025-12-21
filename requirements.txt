@@ -1,0 +1,19 @@
+# yt-dlp GUI Desktop App - Dependencies
+# Python 3.9+ required
+
+# GUI Framework
+PyQt6>=6.6.1
+PyQt6-sip>=13.6.0
+
+# Video Downloader
+yt-dlp>=2024.12.06
+
+# HTTP Requests (for future features)
+requests>=2.31.0
+
+# Testing
+pytest>=7.4.3
+pytest-qt>=4.2.0
+
+# Bundling
+pyinstaller>=6.1.0
