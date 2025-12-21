@@ -81,8 +81,32 @@ class ConfigManager:
             "last_format": "video",
             "last_quality": "best",
             "window_geometry": None,
-            "download_history": []
+            "download_history": [],
+            "groq_api_key": ""
         }
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a configuration value.
+        
+        Args:
+            key: Configuration key
+            default: Default value if key not found
+            
+        Returns:
+            Configuration value or default
+        """
+        return self._config.get(key, default)
+    
+    def set(self, key: str, value: Any) -> None:
+        """Set a configuration value and save.
+        
+        Args:
+            key: Configuration key
+            value: Value to set
+        """
+        self._config[key] = value
+        self._save_config()
+        logger.debug(f"Config updated: {key}")
     
     def load_config(self) -> dict[str, Any]:
         """Load and return the current configuration.

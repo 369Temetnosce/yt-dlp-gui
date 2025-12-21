@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
 from .config_manager import ConfigManager
 from .download_manager import DownloadManager
 from .ytdlp_wrapper import YTDLPWrapper
+from .transcriber import Transcriber
 from .utils import (
     get_output_filename,
     get_unique_filename,
@@ -67,10 +68,12 @@ class MainWindow(QMainWindow):
         self.config = ConfigManager()
         self.download_manager = DownloadManager(self)
         self.ytdlp_wrapper = YTDLPWrapper()
+        self.transcriber = Transcriber(self.config.get("groq_api_key"))
         
         # State
         self._current_metadata: Optional[dict] = None
         self._metadata_fetch_timer: Optional[QTimer] = None
+        self._last_downloaded_file: Optional[str] = None
         
         # Setup UI
         self._init_ui()
@@ -275,7 +278,7 @@ class MainWindow(QMainWindow):
         return group
     
     def _create_control_buttons(self) -> QWidget:
-        """Create control buttons (Open Folder, Clear Log)."""
+        """Create control buttons (Open Folder, Transcribe, Clear Log, Settings)."""
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -284,11 +287,21 @@ class MainWindow(QMainWindow):
         self.open_folder_button.setMinimumHeight(36)
         layout.addWidget(self.open_folder_button)
         
+        self.transcribe_button = QPushButton("🎤 Transcribe")
+        self.transcribe_button.setMinimumHeight(36)
+        self.transcribe_button.setEnabled(False)  # Enabled after download
+        self.transcribe_button.setToolTip("Transcribe the last downloaded video")
+        layout.addWidget(self.transcribe_button)
+        
         self.clear_log_button = QPushButton("🗑 Clear Log")
         self.clear_log_button.setMinimumHeight(36)
         layout.addWidget(self.clear_log_button)
         
         layout.addStretch()
+        
+        self.settings_button = QPushButton("⚙ Settings")
+        self.settings_button.setMinimumHeight(36)
+        layout.addWidget(self.settings_button)
         
         return container
     
@@ -308,7 +321,9 @@ class MainWindow(QMainWindow):
         
         # Control buttons
         self.open_folder_button.clicked.connect(self._on_open_folder)
+        self.transcribe_button.clicked.connect(self._on_transcribe_clicked)
         self.clear_log_button.clicked.connect(self._on_clear_log)
+        self.settings_button.clicked.connect(self._on_settings_clicked)
         
         # Download manager signals
         self.download_manager.progress_updated.connect(self._on_progress_update)
@@ -565,6 +580,10 @@ class MainWindow(QMainWindow):
         self._set_downloading_state(False)
         self.progress_bar.setValue(100)
         
+        # Store last downloaded file for transcription
+        self._last_downloaded_file = file_path
+        self.transcribe_button.setEnabled(True)
+        
         # Add to history
         if self._current_metadata:
             self.config.add_download_history(
@@ -580,11 +599,15 @@ class MainWindow(QMainWindow):
         self._current_metadata = None
         self.video_info_label.hide()
         
-        # Show success message
-        self._show_info_dialog(
+        # Show success message with transcribe option
+        reply = QMessageBox.question(
+            self,
             "Download Complete",
-            f"File saved successfully!\n\n{Path(file_path).name}\nSize: {file_size} MB"
+            f"File saved successfully!\n\n{Path(file_path).name}\nSize: {file_size} MB\n\nWould you like to transcribe this video?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._on_transcribe_clicked()
     
     @pyqtSlot(str)
     def _on_download_error(self, message: str) -> None:
@@ -609,6 +632,136 @@ class MainWindow(QMainWindow):
     def _on_clear_log(self) -> None:
         """Clear the log area."""
         self.log_area.clear()
+    
+    @pyqtSlot()
+    def _on_transcribe_clicked(self) -> None:
+        """Handle Transcribe button click."""
+        if not self._last_downloaded_file:
+            self._show_error_dialog("No File", "No video file to transcribe. Download a video first.")
+            return
+        
+        file_path = Path(self._last_downloaded_file)
+        if not file_path.exists():
+            self._show_error_dialog("File Not Found", f"The file no longer exists:\n{file_path}")
+            self.transcribe_button.setEnabled(False)
+            return
+        
+        # Check if API key is configured
+        if not self.transcriber.has_groq_api_key():
+            reply = QMessageBox.question(
+                self,
+                "Groq API Key Required",
+                "Transcription requires a Groq API key.\n\n"
+                "Would you like to configure it now?\n\n"
+                "(Get a free key at groq.com)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._on_settings_clicked()
+            return
+        
+        # Start transcription
+        self._log(f"🎤 Starting transcription: {file_path.name}")
+        self.transcribe_button.setEnabled(False)
+        self.transcribe_button.setText("Transcribing...")
+        
+        # Run transcription (this blocks UI - could be improved with QThread)
+        from PyQt6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+        
+        result = self.transcriber.transcribe(
+            str(file_path),
+            progress_callback=lambda msg: self._log(f"  {msg}")
+        )
+        
+        self.transcribe_button.setText("🎤 Transcribe")
+        self.transcribe_button.setEnabled(True)
+        
+        if "error" in result:
+            self._log(f"✗ Transcription failed: {result['error']}")
+            self._show_error_dialog("Transcription Failed", result["error"])
+            return
+        
+        # Save transcript
+        transcript_path = file_path.with_suffix(".txt")
+        if self.transcriber.save_transcript(result["text"], str(file_path.with_suffix(""))):
+            self._log(f"✓ Transcript saved: {transcript_path.name}")
+            
+            # Show result with option to copy
+            text_preview = result["text"][:500] + "..." if len(result["text"]) > 500 else result["text"]
+            
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Transcription Complete")
+            msg_box.setText(f"Transcript saved to:\n{transcript_path.name}\n\nLanguage: {result.get('language', 'unknown')}")
+            msg_box.setDetailedText(result["text"])
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Save)
+            
+            # Add copy button
+            copy_button = msg_box.addButton("Copy to Clipboard", QMessageBox.ButtonRole.ActionRole)
+            
+            msg_box.exec()
+            
+            if msg_box.clickedButton() == copy_button:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.clipboard().setText(result["text"])
+                self._log("📋 Transcript copied to clipboard")
+        else:
+            self._log(f"✗ Failed to save transcript")
+    
+    @pyqtSlot()
+    def _on_settings_clicked(self) -> None:
+        """Show settings dialog."""
+        from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        dialog.setMinimumWidth(400)
+        
+        layout = QFormLayout(dialog)
+        
+        # Groq API Key
+        api_key_input = QLineEdit()
+        api_key_input.setPlaceholderText("Enter your Groq API key")
+        api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        current_key = self.config.get("groq_api_key", "")
+        if current_key:
+            api_key_input.setText(current_key)
+        layout.addRow("Groq API Key:", api_key_input)
+        
+        # Show/hide key button
+        show_key_btn = QPushButton("Show")
+        show_key_btn.setCheckable(True)
+        show_key_btn.toggled.connect(
+            lambda checked: api_key_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        layout.addRow("", show_key_btn)
+        
+        # Help text
+        help_label = QLabel('<a href="https://console.groq.com/keys">Get free API key from Groq</a>')
+        help_label.setOpenExternalLinks(True)
+        layout.addRow("", help_label)
+        
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            api_key = api_key_input.text().strip()
+            if api_key:
+                self.config.set("groq_api_key", api_key)
+                self.transcriber.set_groq_api_key(api_key)
+                self._log("✓ Groq API key saved")
+            elif current_key:
+                # Key was cleared
+                self.config.set("groq_api_key", "")
+                self.transcriber.set_groq_api_key("")
+                self._log("ℹ Groq API key removed")
     
     def _log(self, message: str) -> None:
         """Add a message to the log area."""
