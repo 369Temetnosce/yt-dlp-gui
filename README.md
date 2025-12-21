@@ -15,10 +15,12 @@ A modern, user-friendly desktop application for downloading YouTube videos and a
 - Automatic browser cookie support for age-restricted videos
 - Smart format selection (works with or without ffmpeg)
 
-### 🎤 Transcription (NEW!)
+### 🎤 Transcription
 - **Groq Whisper API** integration for fast, accurate transcription
 - **Chunked processing** for long videos (any length supported!)
 - **Optional timestamps** in output (e.g., `[00:01:23] text`)
+- **Auto rate limit handling** - waits and retries automatically
+- **Resume support** - continue interrupted transcriptions
 - Transcribe downloaded videos or browse for any existing file
 - Automatic audio extraction at optimal settings (32kbps, 16kHz mono)
 
@@ -127,6 +129,9 @@ The app automatically detects available browsers for cookie extraction:
 - [x] Groq Whisper transcription
 - [x] Chunked transcription for long videos
 - [x] Timestamp support
+- [x] Auto rate limit handling with retry
+- [x] Resume interrupted transcriptions
+- [x] Windsurf auto-setup workflows
 - [ ] Web version (Railway deployment)
 - [ ] Batch downloads
 - [ ] Playlist support

@@ -22,6 +22,12 @@ All notable changes to this project will be documented in this file.
   - Optional timestamps in output (`[HH:MM:SS] text`)
   - Browse and transcribe any existing video/audio file
   - Optimal audio extraction settings (32kbps, 16kHz, mono)
+  - **Auto rate limit handling** - parses wait time, waits, and retries (up to 5x)
+  - **Resume support** - saves progress after each chunk, can continue interrupted transcriptions
+
+- **Developer Experience**
+  - Windsurf workflows for auto-setup on new computers (`.windsurf/workflows/`)
+  - Use `/setup` or `/start-working` slash commands
 
 - **UI/UX**
   - Modern PyQt6 interface
