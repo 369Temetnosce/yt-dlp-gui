@@ -99,6 +99,7 @@ class DownloadWorker(QObject):
             
             # Read output line by line
             last_percentage = 0
+            error_lines = []  # Capture error output
             for line in iter(self._process.stdout.readline, ''):
                 if self._cancelled:
                     self._process.terminate()
@@ -109,6 +110,11 @@ class DownloadWorker(QObject):
                 line = line.strip()
                 if not line:
                     continue
+                
+                # Capture error lines
+                if "ERROR" in line or "error" in line.lower():
+                    error_lines.append(line)
+                    logger.error(f"yt-dlp error: {line}")
                 
                 # Parse progress
                 progress = self._parse_progress_line(line)
@@ -143,10 +149,21 @@ class DownloadWorker(QObject):
                 )
                 logger.info(f"Download complete: {full_path} ({file_size} MB)")
             else:
-                self.error_occurred.emit(
-                    "Download failed. Please check your connection and try again."
-                )
-                logger.error(f"Download failed with code {self._process.returncode}")
+                # Build error message from captured errors
+                if error_lines:
+                    error_msg = error_lines[-1]  # Use last error
+                    # Clean up error message for user
+                    if "Sign in" in error_msg or "bot" in error_msg.lower():
+                        error_msg = "YouTube requires sign-in. Please sign in to YouTube in your browser and try again."
+                    elif "unavailable" in error_msg.lower():
+                        error_msg = "This video is unavailable or private."
+                    elif "age" in error_msg.lower():
+                        error_msg = "This video is age-restricted. Please sign in to YouTube in your browser."
+                else:
+                    error_msg = "Download failed. Please check your connection and try again."
+                
+                self.error_occurred.emit(error_msg)
+                logger.error(f"Download failed with code {self._process.returncode}: {error_lines}")
                 
         except FileNotFoundError:
             self.error_occurred.emit(

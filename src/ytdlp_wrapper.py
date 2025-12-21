@@ -26,7 +26,7 @@ class YTDLPWrapper:
     """
     
     # Timeout for subprocess calls (seconds)
-    METADATA_TIMEOUT = 30
+    METADATA_TIMEOUT = 60  # Increased for cookie extraction
     VERSION_TIMEOUT = 10
     
     # YouTube URL patterns
@@ -37,9 +37,18 @@ class YTDLPWrapper:
         r'(https?://)?(www\.)?youtube\.com/embed/[\w-]+',
     ]
     
-    def __init__(self) -> None:
-        """Initialize YTDLPWrapper."""
+    # Supported browsers for cookie extraction
+    SUPPORTED_BROWSERS = ["chrome", "firefox", "edge", "brave", "opera", "vivaldi", "safari"]
+    
+    def __init__(self, browser: Optional[str] = None) -> None:
+        """Initialize YTDLPWrapper.
+        
+        Args:
+            browser: Browser to extract cookies from (e.g., 'chrome', 'firefox').
+                     If None, will auto-detect available browser.
+        """
         self._yt_dlp_path: Optional[str] = None
+        self._browser: Optional[str] = browser or self._detect_browser()
     
     @staticmethod
     def validate_url(url: str) -> bool:
@@ -185,8 +194,17 @@ class YTDLPWrapper:
         try:
             logger.info(f"Fetching metadata for: {url}")
             
+            # Build command with cookies support
+            cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--no-playlist"]
+            
+            # Add browser cookies if available (helps with age-restricted videos)
+            if self._browser:
+                cmd.extend(["--cookies-from-browser", self._browser])
+            
+            cmd.append(url)
+            
             result = subprocess.run(
-                ["yt-dlp", "--dump-json", "--no-warnings", "--no-playlist", url],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.METADATA_TIMEOUT
@@ -317,6 +335,10 @@ class YTDLPWrapper:
         # Output path
         cmd.extend(["-o", output_path])
         
+        # Add browser cookies if available (helps with age-restricted videos)
+        if self._browser:
+            cmd.extend(["--cookies-from-browser", self._browser])
+        
         # Progress output for parsing
         cmd.extend([
             "--newline",  # Print progress on new lines
@@ -330,22 +352,37 @@ class YTDLPWrapper:
         logger.debug(f"Built command: {' '.join(cmd)}")
         return cmd
     
-    def _get_format_spec(self, quality: str) -> str:
+    def _get_format_spec(self, quality: str, ffmpeg_available: bool = None) -> str:
         """Get yt-dlp format specification for quality.
         
         Args:
             quality: Quality string like "best", "720p", etc.
+            ffmpeg_available: Whether ffmpeg is installed for merging
             
         Returns:
             yt-dlp format specification string
         """
-        quality_map = {
-            "best": "bestvideo+bestaudio/best",
-            "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-            "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-            "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
-            "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]",
-        }
+        if ffmpeg_available is None:
+            ffmpeg_available = self.check_ffmpeg_installed()
+        
+        if ffmpeg_available:
+            # Can merge separate video+audio streams
+            quality_map = {
+                "best": "bestvideo+bestaudio/best",
+                "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+                "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+                "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
+                "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]",
+            }
+        else:
+            # No ffmpeg - use pre-muxed formats only
+            quality_map = {
+                "best": "best[ext=mp4]/best",
+                "1080p": "best[height<=1080][ext=mp4]/best[height<=1080]",
+                "720p": "best[height<=720][ext=mp4]/best[height<=720]",
+                "480p": "best[height<=480][ext=mp4]/best[height<=480]",
+                "360p": "best[height<=360][ext=mp4]/best[height<=360]",
+            }
         
         return quality_map.get(quality, quality_map["best"])
     
@@ -367,3 +404,69 @@ class YTDLPWrapper:
             return False
         except Exception:
             return False
+    
+    def _detect_browser(self) -> Optional[str]:
+        """Auto-detect an available browser for cookie extraction.
+        
+        Returns:
+            Browser name if found, None otherwise
+        """
+        # Try common browsers in order of preference
+        for browser in ["chrome", "firefox", "edge", "brave"]:
+            if self._test_browser_cookies(browser):
+                logger.info(f"Using browser for cookies: {browser}")
+                return browser
+        
+        logger.warning("No browser detected for cookie extraction")
+        return None
+    
+    def _test_browser_cookies(self, browser: str) -> bool:
+        """Test if we can extract cookies from a browser.
+        
+        Args:
+            browser: Browser name to test
+            
+        Returns:
+            True if browser cookies are accessible
+        """
+        try:
+            # Test with a simple YouTube URL to verify cookies work
+            result = subprocess.run(
+                ["yt-dlp", "--cookies-from-browser", browser, 
+                 "--simulate", "--quiet", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            # Check for DPAPI or other cookie errors
+            if "DPAPI" in result.stderr or "decrypt" in result.stderr.lower():
+                logger.warning(f"Browser {browser} cookies encrypted (DPAPI issue)")
+                return False
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Browser {browser} cookie test timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Browser {browser} cookie test failed: {e}")
+            return False
+    
+    def get_browser(self) -> Optional[str]:
+        """Get the currently configured browser for cookies.
+        
+        Returns:
+            Browser name or None
+        """
+        return self._browser
+    
+    def set_browser(self, browser: Optional[str]) -> None:
+        """Set the browser to use for cookie extraction.
+        
+        Args:
+            browser: Browser name (chrome, firefox, edge, etc.) or None to disable
+        """
+        if browser and browser.lower() in self.SUPPORTED_BROWSERS:
+            self._browser = browser.lower()
+            logger.info(f"Browser set to: {self._browser}")
+        else:
+            self._browser = None
+            logger.info("Browser cookies disabled")

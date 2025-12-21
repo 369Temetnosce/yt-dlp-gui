@@ -354,9 +354,20 @@ class MainWindow(QMainWindow):
             )
             self.download_button.setEnabled(False)
             self._log("⚠ yt-dlp not found - downloads disabled")
+        else:
+            # Log yt-dlp version
+            version = self.ytdlp_wrapper.get_yt_dlp_version()
+            self._log(f"yt-dlp version: {version}")
         
         if not self.ytdlp_wrapper.check_ffmpeg_installed():
             self._log("ℹ ffmpeg not found - audio downloads may have issues")
+        
+        # Log browser cookies status
+        browser = self.ytdlp_wrapper.get_browser()
+        if browser:
+            self._log(f"🍪 Using {browser} cookies for age-restricted videos")
+        else:
+            self._log("ℹ No browser cookies - some videos may be restricted")
     
     @pyqtSlot(str)
     def _on_url_changed(self, text: str) -> None:
