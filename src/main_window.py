@@ -692,8 +692,35 @@ class MainWindow(QMainWindow):
                 self._on_settings_clicked()
             return
         
+        # Ask about timestamps
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox
+        
+        options_dialog = QDialog(self)
+        options_dialog.setWindowTitle("Transcription Options")
+        options_dialog.setMinimumWidth(300)
+        
+        layout = QVBoxLayout(options_dialog)
+        layout.addWidget(QLabel(f"<b>File:</b> {file_path.name}"))
+        
+        timestamps_checkbox = QCheckBox("Include timestamps (e.g., [00:01:23] text)")
+        timestamps_checkbox.setChecked(self.config.get("include_timestamps", False))
+        layout.addWidget(timestamps_checkbox)
+        
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(options_dialog.accept)
+        buttons.rejected.connect(options_dialog.reject)
+        layout.addWidget(buttons)
+        
+        if options_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        
+        include_timestamps = timestamps_checkbox.isChecked()
+        self.config.set("include_timestamps", include_timestamps)
+        
         # Start transcription
-        self._log(f"🎤 Starting transcription: {file_path.name}")
+        self._log(f"🎤 Starting transcription: {file_path.name}" + (" (with timestamps)" if include_timestamps else ""))
         self.transcribe_button.setEnabled(False)
         self.transcribe_button.setText("Transcribing...")
         
@@ -703,7 +730,8 @@ class MainWindow(QMainWindow):
         
         result = self.transcriber.transcribe(
             str(file_path),
-            progress_callback=lambda msg: self._log(f"  {msg}")
+            progress_callback=lambda msg: (self._log(f"  {msg}"), QCoreApplication.processEvents()),
+            include_timestamps=include_timestamps
         )
         
         self.transcribe_button.setText("🎤 Transcribe")
@@ -714,19 +742,25 @@ class MainWindow(QMainWindow):
             self._show_error_dialog("Transcription Failed", result["error"])
             return
         
+        # Determine which text to save (timestamped or plain)
+        if include_timestamps and "timestamped_text" in result:
+            save_text = result["timestamped_text"]
+            display_text = result["timestamped_text"]
+        else:
+            save_text = result["text"]
+            display_text = result["text"]
+        
         # Save transcript
         transcript_path = file_path.with_suffix(".txt")
-        if self.transcriber.save_transcript(result["text"], str(file_path.with_suffix(""))):
-            self._log(f"✓ Transcript saved: {transcript_path.name}")
-            
-            # Show result with option to copy
-            text_preview = result["text"][:500] + "..." if len(result["text"]) > 500 else result["text"]
+        if self.transcriber.save_transcript(save_text, str(file_path.with_suffix(""))):
+            chunks_info = f"\nChunks processed: {result.get('chunks', 1)}" if result.get('chunks', 1) > 1 else ""
+            self._log(f"✓ Transcript saved: {transcript_path.name}{chunks_info}")
             
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("Transcription Complete")
-            msg_box.setText(f"Transcript saved to:\n{transcript_path.name}\n\nLanguage: {result.get('language', 'unknown')}")
-            msg_box.setDetailedText(result["text"])
-            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Save)
+            msg_box.setText(f"Transcript saved to:\n{transcript_path.name}\n\nLanguage: {result.get('language', 'unknown')}{chunks_info}")
+            msg_box.setDetailedText(display_text)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
             
             # Add copy button
             copy_button = msg_box.addButton("Copy to Clipboard", QMessageBox.ButtonRole.ActionRole)
@@ -735,7 +769,7 @@ class MainWindow(QMainWindow):
             
             if msg_box.clickedButton() == copy_button:
                 from PyQt6.QtWidgets import QApplication
-                QApplication.clipboard().setText(result["text"])
+                QApplication.clipboard().setText(display_text)
                 self._log("📋 Transcript copied to clipboard")
         else:
             self._log(f"✗ Failed to save transcript")
