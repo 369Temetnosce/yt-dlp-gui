@@ -16,12 +16,18 @@ For long files, audio is split into chunks and transcribed separately.
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional, Callable, List
 
 logger = logging.getLogger(__name__)
+
+# Rate limit retry settings
+MAX_RETRIES = 5
+RATE_LIMIT_BUFFER_SECONDS = 10  # Extra wait time after rate limit
 
 # Optimal settings for Whisper transcription
 WHISPER_BITRATE = "32k"  # 32 kbps - optimal for speech, no quality loss
@@ -164,7 +170,29 @@ class Transcriber:
                 # Calculate time offset for this chunk
                 time_offset = i * CHUNK_DURATION_SECONDS
                 
-                result = self._transcribe_groq(chunk_path, language, include_timestamps, time_offset)
+                # Retry loop for rate limits
+                result = None
+                for retry in range(MAX_RETRIES):
+                    result = self._transcribe_groq(chunk_path, language, include_timestamps, time_offset)
+                    
+                    if "error" not in result:
+                        break  # Success
+                    
+                    # Check if it's a rate limit error
+                    error_msg = result.get("error", "")
+                    if "Rate limit" in error_msg or "rate limit" in error_msg.lower():
+                        # Extract wait time from error message
+                        wait_time = self._parse_rate_limit_wait(error_msg)
+                        if wait_time and retry < MAX_RETRIES - 1:
+                            wait_with_buffer = wait_time + RATE_LIMIT_BUFFER_SECONDS
+                            logger.warning(f"Rate limit hit, waiting {wait_with_buffer}s before retry...")
+                            if progress_callback:
+                                progress_callback(f"⏳ Rate limit - waiting {int(wait_with_buffer)}s (retry {retry+1}/{MAX_RETRIES-1})...")
+                            time.sleep(wait_with_buffer)
+                            continue
+                    
+                    # Non-rate-limit error or max retries reached
+                    break
                 
                 if "error" in result:
                     logger.error(f"Chunk {i+1} failed: {result['error']}")
@@ -493,6 +521,39 @@ class Transcriber:
             return f"{hours:02d}:{minutes:02d}:{secs:02d}"
         else:
             return f"{minutes:02d}:{secs:02d}"
+    
+    def _parse_rate_limit_wait(self, error_msg: str) -> Optional[float]:
+        """Parse wait time from Groq rate limit error message.
+        
+        Example: "Please try again in 4m12.5s"
+        
+        Returns:
+            Wait time in seconds, or None if not parseable
+        """
+        try:
+            # Look for pattern like "4m12.5s" or "30s" or "2m"
+            match = re.search(r'try again in (\d+)m(\d+(?:\.\d+)?)s', error_msg)
+            if match:
+                minutes = int(match.group(1))
+                seconds = float(match.group(2))
+                return minutes * 60 + seconds
+            
+            # Just seconds
+            match = re.search(r'try again in (\d+(?:\.\d+)?)s', error_msg)
+            if match:
+                return float(match.group(1))
+            
+            # Just minutes
+            match = re.search(r'try again in (\d+)m', error_msg)
+            if match:
+                return int(match.group(1)) * 60
+            
+            # Default wait if we can't parse
+            return 300  # 5 minutes default
+            
+        except Exception as e:
+            logger.warning(f"Could not parse rate limit wait time: {e}")
+            return 300  # 5 minutes default
     
     def _transcribe_local(
         self,
