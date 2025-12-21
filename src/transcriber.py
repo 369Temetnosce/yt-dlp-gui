@@ -83,6 +83,9 @@ class Transcriber:
         # Extract audio if video file
         audio_path = self._extract_audio(file_path, progress_callback)
         if audio_path is None:
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > 25:
+                return {"error": f"File too large ({file_size_mb:.1f}MB). Groq limit is 25MB.\n\nInstall ffmpeg to extract audio from large videos:\n  winget install ffmpeg"}
             return {"error": "Failed to extract audio from video"}
         
         try:
@@ -119,7 +122,7 @@ class Transcriber:
         file_path: Path,
         progress_callback: Optional[Callable[[str], None]] = None
     ) -> Optional[Path]:
-        """Extract audio from video file using yt-dlp or ffmpeg.
+        """Extract audio from video file using ffmpeg or fallback methods.
         
         Returns path to audio file (may be same as input if already audio).
         """
@@ -128,64 +131,53 @@ class Transcriber:
         if file_path.suffix.lower() in audio_extensions:
             return file_path
         
+        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        
+        # If file is small enough, use it directly (Groq accepts video up to 25MB)
+        if file_size_mb <= 25:
+            logger.info(f"Using video file directly ({file_size_mb:.1f}MB <= 25MB limit)")
+            return file_path
+        
         if progress_callback:
-            progress_callback("Extracting audio...")
+            progress_callback("Extracting audio (file > 25MB)...")
         
         # Create temp file for audio
         temp_audio = Path(tempfile.gettempdir()) / f"yt-dlp-audio-{file_path.stem}.mp3"
         
-        # Try ffmpeg first
+        # Try ffmpeg first (most reliable for local files)
         try:
             result = subprocess.run(
                 [
                     "ffmpeg", "-i", str(file_path),
                     "-vn",  # No video
                     "-acodec", "libmp3lame",
-                    "-ab", "128k",
+                    "-ab", "64k",  # Lower bitrate to reduce file size
+                    "-ar", "16000",  # 16kHz sample rate (good for speech)
+                    "-ac", "1",  # Mono
                     "-y",  # Overwrite
                     str(temp_audio)
                 ],
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=600  # 10 min timeout for large files
             )
             if result.returncode == 0 and temp_audio.exists():
-                logger.info(f"Audio extracted with ffmpeg: {temp_audio}")
-                return temp_audio
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+                audio_size_mb = temp_audio.stat().st_size / (1024 * 1024)
+                logger.info(f"Audio extracted with ffmpeg: {temp_audio} ({audio_size_mb:.1f}MB)")
+                if audio_size_mb <= 25:
+                    return temp_audio
+                else:
+                    logger.warning(f"Extracted audio still too large: {audio_size_mb:.1f}MB")
+                    temp_audio.unlink()
+        except FileNotFoundError:
+            logger.warning("ffmpeg not found - cannot extract audio from large video")
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg audio extraction timed out")
+        except Exception as e:
+            logger.error(f"ffmpeg error: {e}")
         
-        # Try yt-dlp for audio extraction
-        try:
-            result = subprocess.run(
-                [
-                    "yt-dlp",
-                    "-x",  # Extract audio
-                    "--audio-format", "mp3",
-                    "-o", str(temp_audio.with_suffix('')),  # yt-dlp adds extension
-                    str(file_path)
-                ],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            # yt-dlp might add .mp3 extension
-            if temp_audio.exists():
-                return temp_audio
-            mp3_path = temp_audio.with_suffix('.mp3')
-            if mp3_path.exists():
-                return mp3_path
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        
-        # If no audio extraction available, try using video directly
-        # Groq API can handle video files up to 25MB
-        file_size_mb = file_path.stat().st_size / (1024 * 1024)
-        if file_size_mb <= 25:
-            logger.info("Using video file directly (under 25MB)")
-            return file_path
-        
-        logger.error("Could not extract audio - ffmpeg not available and file too large")
+        # No ffmpeg available - provide helpful error
+        logger.error(f"Cannot transcribe: file is {file_size_mb:.1f}MB (limit 25MB) and ffmpeg not installed")
         return None
     
     def _transcribe_groq(

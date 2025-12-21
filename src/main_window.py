@@ -289,8 +289,7 @@ class MainWindow(QMainWindow):
         
         self.transcribe_button = QPushButton("🎤 Transcribe")
         self.transcribe_button.setMinimumHeight(36)
-        self.transcribe_button.setEnabled(False)  # Enabled after download
-        self.transcribe_button.setToolTip("Transcribe the last downloaded video")
+        self.transcribe_button.setToolTip("Transcribe a video/audio file to text")
         layout.addWidget(self.transcribe_button)
         
         self.clear_log_button = QPushButton("🗑 Clear Log")
@@ -582,7 +581,6 @@ class MainWindow(QMainWindow):
         
         # Store last downloaded file for transcription
         self._last_downloaded_file = file_path
-        self.transcribe_button.setEnabled(True)
         
         # Add to history
         if self._current_metadata:
@@ -636,14 +634,48 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_transcribe_clicked(self) -> None:
         """Handle Transcribe button click."""
-        if not self._last_downloaded_file:
-            self._show_error_dialog("No File", "No video file to transcribe. Download a video first.")
-            return
+        # If no recent download, prompt to select a file
+        if not self._last_downloaded_file or not Path(self._last_downloaded_file).exists():
+            file_path = self._select_video_for_transcription()
+            if not file_path:
+                return
+        else:
+            # Ask user: transcribe last download or browse for file?
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Transcribe Video")
+            msg_box.setText(f"Transcribe the last downloaded video?\n\n{Path(self._last_downloaded_file).name}")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            browse_button = msg_box.addButton("Browse...", QMessageBox.ButtonRole.ActionRole)
+            
+            msg_box.exec()
+            
+            if msg_box.clickedButton() == browse_button:
+                file_path = self._select_video_for_transcription()
+                if not file_path:
+                    return
+            elif msg_box.result() == QMessageBox.StandardButton.Yes:
+                file_path = Path(self._last_downloaded_file)
+            else:
+                return
         
-        file_path = Path(self._last_downloaded_file)
+        self._transcribe_file(file_path)
+    
+    def _select_video_for_transcription(self) -> Optional[Path]:
+        """Open file dialog to select a video/audio file for transcription."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Video/Audio to Transcribe",
+            self.save_path_input.text(),
+            "Media Files (*.mp4 *.mkv *.webm *.avi *.mov *.mp3 *.m4a *.wav *.flac);;All Files (*.*)"
+        )
+        if file_path:
+            return Path(file_path)
+        return None
+    
+    def _transcribe_file(self, file_path: Path) -> None:
+        """Transcribe the specified file."""
         if not file_path.exists():
             self._show_error_dialog("File Not Found", f"The file no longer exists:\n{file_path}")
-            self.transcribe_button.setEnabled(False)
             return
         
         # Check if API key is configured
