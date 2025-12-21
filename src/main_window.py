@@ -692,6 +692,74 @@ class MainWindow(QMainWindow):
                 self._on_settings_clicked()
             return
         
+        # Check for resumable transcription
+        resume_info = self.transcriber.check_resume_available(str(file_path))
+        if resume_info:
+            reply = QMessageBox.question(
+                self,
+                "Resume Transcription?",
+                f"Found incomplete transcription for this file.\n\n"
+                f"Progress: {resume_info['completed_chunks']}/{resume_info['total_chunks']} chunks completed\n\n"
+                f"Would you like to resume from chunk {resume_info['completed_chunks'] + 1}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Yes:
+                # Resume transcription
+                self._log(f"🎤 Resuming transcription: {file_path.name} (chunk {resume_info['completed_chunks'] + 1}/{resume_info['total_chunks']})")
+                self.transcribe_button.setEnabled(False)
+                self.transcribe_button.setText("Transcribing...")
+                
+                from PyQt6.QtCore import QCoreApplication
+                QCoreApplication.processEvents()
+                
+                result = self.transcriber.resume_transcription(
+                    str(file_path),
+                    progress_callback=lambda msg: (self._log(f"  {msg}"), QCoreApplication.processEvents())
+                )
+                
+                self.transcribe_button.setText("🎤 Transcribe")
+                self.transcribe_button.setEnabled(True)
+                
+                if "error" in result:
+                    self._log(f"✗ Transcription failed: {result['error']}")
+                    self._show_error_dialog("Transcription Failed", result["error"])
+                    return
+                
+                # Use the timestamps setting from the saved progress
+                include_timestamps = resume_info.get('include_timestamps', False)
+                if include_timestamps and "timestamped_text" in result:
+                    save_text = result["timestamped_text"]
+                    display_text = result["timestamped_text"]
+                else:
+                    save_text = result["text"]
+                    display_text = result["text"]
+                
+                # Save and show result (same as normal flow below)
+                transcript_path = file_path.with_suffix(".txt")
+                if self.transcriber.save_transcript(save_text, str(file_path.with_suffix(""))):
+                    chunks_info = f"\nChunks processed: {result.get('chunks', 1)}" if result.get('chunks', 1) > 1 else ""
+                    self._log(f"✓ Transcript saved: {transcript_path.name}{chunks_info}")
+                    
+                    msg_box = QMessageBox(self)
+                    msg_box.setWindowTitle("Transcription Complete")
+                    msg_box.setText(f"Transcript saved to:\n{transcript_path.name}\n\nLanguage: {result.get('language', 'unknown')}{chunks_info}")
+                    msg_box.setDetailedText(display_text)
+                    msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+                    
+                    copy_button = msg_box.addButton("Copy to Clipboard", QMessageBox.ButtonRole.ActionRole)
+                    msg_box.exec()
+                    
+                    if msg_box.clickedButton() == copy_button:
+                        from PyQt6.QtWidgets import QApplication
+                        QApplication.clipboard().setText(display_text)
+                        self._log("📋 Transcript copied to clipboard")
+                else:
+                    self._log(f"✗ Failed to save transcript")
+                return
+            # If No, continue with fresh transcription (fall through)
+        
         # Ask about timestamps
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QDialogButtonBox
         

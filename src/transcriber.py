@@ -51,6 +51,8 @@ class Transcriber:
         self._groq_api_key = groq_api_key or os.environ.get("GROQ_API_KEY")
         self._local_whisper_available: Optional[bool] = None
         self._audio_chunks: List[Path] = []  # For chunked processing
+        self._progress_file: Optional[Path] = None  # For resume support
+        self._source_file: Optional[Path] = None  # Track source for resume
     
     def set_groq_api_key(self, api_key: str) -> None:
         """Set Groq API key."""
@@ -101,6 +103,7 @@ class Transcriber:
         """
         self._include_timestamps = include_timestamps
         file_path = Path(file_path)
+        self._source_file = file_path  # Track for resume support
         
         if not file_path.exists():
             return {"error": f"File not found: {file_path}"}
@@ -150,9 +153,16 @@ class Transcriber:
     def _transcribe_chunks(
         self,
         language: Optional[str] = None,
-        progress_callback: Optional[Callable[[str], None]] = None
+        progress_callback: Optional[Callable[[str], None]] = None,
+        start_chunk: int = 0
     ) -> dict:
-        """Transcribe multiple audio chunks and combine results."""
+        """Transcribe multiple audio chunks and combine results.
+        
+        Args:
+            language: Optional language code
+            progress_callback: Progress update callback
+            start_chunk: Chunk index to start from (for resume)
+        """
         if not self._groq_api_key:
             return {"error": "No Groq API key configured. Please add your API key in Settings."}
         
@@ -162,8 +172,24 @@ class Transcriber:
         total_chunks = len(self._audio_chunks)
         include_timestamps = getattr(self, '_include_timestamps', False)
         
+        # Load existing progress if resuming
+        if start_chunk > 0 and self._progress_file and self._progress_file.exists():
+            try:
+                with open(self._progress_file, 'r', encoding='utf-8') as f:
+                    progress_data = json.load(f)
+                    all_text = progress_data.get('texts', [])
+                    all_timestamped_text = progress_data.get('timestamped_texts', [])
+                    detected_language = progress_data.get('language')
+                    logger.info(f"Loaded progress: {len(all_text)} chunks already transcribed")
+            except Exception as e:
+                logger.warning(f"Could not load progress file: {e}")
+        
         try:
             for i, chunk_path in enumerate(self._audio_chunks):
+                # Skip already transcribed chunks
+                if i < start_chunk:
+                    continue
+                    
                 if progress_callback:
                     progress_callback(f"Transcribing chunk {i+1}/{total_chunks}...")
                 
@@ -195,8 +221,10 @@ class Transcriber:
                     break
                 
                 if "error" in result:
+                    # Save progress before failing
+                    self._save_progress(all_text, all_timestamped_text, detected_language, i)
                     logger.error(f"Chunk {i+1} failed: {result['error']}")
-                    return {"error": f"Failed on chunk {i+1}/{total_chunks}: {result['error']}"}
+                    return {"error": f"Failed on chunk {i+1}/{total_chunks}: {result['error']}\n\nProgress saved. You can resume from chunk {i+1}."}
                 
                 all_text.append(result.get("text", ""))
                 if include_timestamps and "timestamped_text" in result:
@@ -205,6 +233,8 @@ class Transcriber:
                 if not detected_language:
                     detected_language = result.get("language")
                 
+                # Save progress after each successful chunk
+                self._save_progress(all_text, all_timestamped_text, detected_language, i + 1)
                 logger.info(f"Chunk {i+1}/{total_chunks} transcribed successfully")
             
             # Combine all transcripts
@@ -221,22 +251,159 @@ class Transcriber:
             if include_timestamps and all_timestamped_text:
                 response["timestamped_text"] = "\n".join(all_timestamped_text)
             
+            # Clean up progress file on success
+            self._cleanup_progress()
+            
+            # Only clean up chunks on success (not on error, to allow resume)
+            self._cleanup_chunks()
+            
             return response
             
-        finally:
-            # Clean up chunk files
-            for chunk_path in self._audio_chunks:
-                try:
-                    chunk_path.unlink()
-                except Exception:
-                    pass
-            # Try to remove the temp directory
-            if self._audio_chunks:
-                try:
-                    self._audio_chunks[0].parent.rmdir()
-                except Exception:
-                    pass
-            self._audio_chunks = []
+        except Exception as e:
+            # Don't clean up on error - allow resume
+            logger.exception(f"Transcription error: {e}")
+            raise
+    
+    def _cleanup_chunks(self) -> None:
+        """Clean up audio chunk files after successful transcription."""
+        for chunk_path in self._audio_chunks:
+            try:
+                chunk_path.unlink()
+            except Exception:
+                pass
+        # Try to remove the temp directory
+        if self._audio_chunks:
+            try:
+                self._audio_chunks[0].parent.rmdir()
+            except Exception:
+                pass
+        self._audio_chunks = []
+    
+    def _save_progress(
+        self,
+        texts: List[str],
+        timestamped_texts: List[str],
+        language: Optional[str],
+        completed_chunks: int
+    ) -> None:
+        """Save transcription progress to file for resume capability."""
+        if not self._source_file:
+            return
+        
+        # Create progress file path next to source file
+        progress_file = self._source_file.with_suffix('.transcribe_progress.json')
+        self._progress_file = progress_file
+        
+        try:
+            progress_data = {
+                'source_file': str(self._source_file),
+                'completed_chunks': completed_chunks,
+                'total_chunks': len(self._audio_chunks),
+                'texts': texts,
+                'timestamped_texts': timestamped_texts,
+                'language': language,
+                'include_timestamps': getattr(self, '_include_timestamps', False),
+                'chunk_paths': [str(p) for p in self._audio_chunks]
+            }
+            with open(progress_file, 'w', encoding='utf-8') as f:
+                json.dump(progress_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"Progress saved: {completed_chunks}/{len(self._audio_chunks)} chunks")
+        except Exception as e:
+            logger.warning(f"Could not save progress: {e}")
+    
+    def _cleanup_progress(self) -> None:
+        """Remove progress file after successful completion."""
+        if self._progress_file and self._progress_file.exists():
+            try:
+                self._progress_file.unlink()
+                logger.info("Progress file cleaned up")
+            except Exception:
+                pass
+        self._progress_file = None
+    
+    def check_resume_available(self, file_path: str) -> Optional[dict]:
+        """Check if there's a resumable transcription for this file.
+        
+        Returns:
+            dict with resume info if available, None otherwise
+        """
+        file_path = Path(file_path)
+        progress_file = file_path.with_suffix('.transcribe_progress.json')
+        
+        if not progress_file.exists():
+            return None
+        
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Verify chunks still exist
+            chunk_paths = [Path(p) for p in data.get('chunk_paths', [])]
+            chunks_exist = all(p.exists() for p in chunk_paths)
+            
+            if not chunks_exist:
+                # Chunks were cleaned up, remove stale progress file
+                progress_file.unlink()
+                return None
+            
+            return {
+                'completed_chunks': data.get('completed_chunks', 0),
+                'total_chunks': data.get('total_chunks', 0),
+                'include_timestamps': data.get('include_timestamps', False)
+            }
+        except Exception as e:
+            logger.warning(f"Could not read progress file: {e}")
+            return None
+    
+    def resume_transcription(
+        self,
+        file_path: str,
+        progress_callback: Optional[Callable[[str], None]] = None
+    ) -> dict:
+        """Resume a previously interrupted transcription.
+        
+        Args:
+            file_path: Path to the original video/audio file
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            Transcription result dict
+        """
+        file_path = Path(file_path)
+        progress_file = file_path.with_suffix('.transcribe_progress.json')
+        
+        if not progress_file.exists():
+            return {"error": "No resumable transcription found for this file."}
+        
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Restore state
+            self._source_file = file_path
+            self._progress_file = progress_file
+            self._include_timestamps = data.get('include_timestamps', False)
+            self._audio_chunks = [Path(p) for p in data.get('chunk_paths', [])]
+            start_chunk = data.get('completed_chunks', 0)
+            
+            # Verify chunks exist
+            if not all(p.exists() for p in self._audio_chunks):
+                self._cleanup_progress()
+                return {"error": "Audio chunks no longer exist. Please start a new transcription."}
+            
+            if progress_callback:
+                progress_callback(f"Resuming from chunk {start_chunk + 1}/{len(self._audio_chunks)}...")
+            
+            logger.info(f"Resuming transcription from chunk {start_chunk + 1}")
+            return self._transcribe_chunks(
+                language=None,
+                progress_callback=progress_callback,
+                start_chunk=start_chunk
+            )
+            
+        except Exception as e:
+            logger.exception(f"Error resuming transcription: {e}")
+            return {"error": f"Failed to resume: {str(e)}"}
     
     def _extract_audio(
         self,
