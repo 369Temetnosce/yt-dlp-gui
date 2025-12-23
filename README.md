@@ -24,6 +24,15 @@ A modern, user-friendly desktop application for downloading YouTube videos and a
 - Transcribe downloaded videos or browse for any existing file
 - Automatic audio extraction at optimal settings (32kbps, 16kHz mono)
 
+### 📝 Proofreading (AI-Powered)
+- **OpenRouter LLM integration** - Claude 3.5 Sonnet, GPT-4o, and more
+- **Automatic chunking** for large transcripts (any length supported!)
+- Grammar, spelling, and punctuation correction
+- Filler word removal (um, uh, you know)
+- Sponsor segment and off-topic content removal
+- Output as clean Markdown file with `-Edited.md` suffix
+- Bulk proofreading - select multiple files at once
+
 ### 🔧 Smart Features
 - Auto-detects Chrome DPAPI encryption issues and falls back to Firefox
 - Works without ffmpeg (uses pre-muxed formats)
@@ -79,9 +88,17 @@ sudo apt install ffmpeg
 3. Check "Include timestamps" if desired
 4. Click **OK** to start
 
+### Proofreading Transcripts
+1. Click **📝 Proofread**
+2. Select one or more `.txt` transcript files
+3. Wait for AI processing (large files are automatically chunked)
+4. Find edited files as `<name>-Edited.md`
+
 ### Settings
 Click **⚙ Settings** to configure:
 - **Groq API Key** - Required for transcription ([Get free key](https://console.groq.com/keys))
+- **OpenRouter API Key** - Required for proofreading ([Get key](https://openrouter.ai/keys))
+- **Proofreader Model** - Choose from Claude 3.5 Sonnet, GPT-4o, etc.
 
 ## Configuration
 
@@ -99,10 +116,11 @@ yt-dlp-gui/
 │   ├── download_manager.py  # Download threading
 │   ├── ytdlp_wrapper.py     # yt-dlp subprocess wrapper
 │   ├── transcriber.py       # Groq Whisper transcription
+│   ├── proofreader.py       # OpenRouter LLM proofreading
 │   ├── config_manager.py    # Settings persistence
 │   └── utils.py             # Helper functions
-├── resources/
-│   └── styles.qss           # Qt stylesheet
+├── .windsurf/workflows/     # Auto-setup workflows
+├── proofreader.txt          # Custom proofreading rules
 ├── requirements.txt
 ├── run.py                   # Convenience launcher
 └── README.md
@@ -132,7 +150,10 @@ The app automatically detects available browsers for cookie extraction:
 - [x] Auto rate limit handling with retry
 - [x] Resume interrupted transcriptions
 - [x] Windsurf auto-setup workflows
-- [ ] Web version (Railway deployment)
+- [x] AI-powered proofreading (OpenRouter)
+- [x] Chunked proofreading for large transcripts
+- [x] Bulk proofreading (multiple files)
+- [ ] Web version (Streamlit + Railway deployment)
 - [ ] Batch downloads
 - [ ] Playlist support
 
@@ -145,4 +166,5 @@ MIT License - see LICENSE file for details.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Video download engine
 - [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) - GUI framework
 - [Groq](https://groq.com) - Whisper API for transcription
+- [OpenRouter](https://openrouter.ai) - LLM API for proofreading
 - [ffmpeg](https://ffmpeg.org) - Audio/video processing

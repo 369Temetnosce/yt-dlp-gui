@@ -38,6 +38,7 @@ from .config_manager import ConfigManager
 from .download_manager import DownloadManager
 from .ytdlp_wrapper import YTDLPWrapper
 from .transcriber import Transcriber
+from .proofreader import Proofreader
 from .utils import (
     get_output_filename,
     get_unique_filename,
@@ -69,6 +70,11 @@ class MainWindow(QMainWindow):
         self.download_manager = DownloadManager(self)
         self.ytdlp_wrapper = YTDLPWrapper()
         self.transcriber = Transcriber(self.config.get("groq_api_key"))
+        self.proofreader = Proofreader(
+            api_key=self.config.get("openrouter_api_key"),
+            model=self.config.get("proofreader_model", "claude-3.5-sonnet"),
+            system_prompt_path=Path(__file__).parent.parent / "proofreader.txt"
+        )
         
         # State
         self._current_metadata: Optional[dict] = None
@@ -292,6 +298,11 @@ class MainWindow(QMainWindow):
         self.transcribe_button.setToolTip("Transcribe a video/audio file to text")
         layout.addWidget(self.transcribe_button)
         
+        self.proofread_button = QPushButton("📝 Proofread")
+        self.proofread_button.setMinimumHeight(36)
+        self.proofread_button.setToolTip("Proofread and edit transcript files using AI")
+        layout.addWidget(self.proofread_button)
+        
         self.clear_log_button = QPushButton("🗑 Clear Log")
         self.clear_log_button.setMinimumHeight(36)
         layout.addWidget(self.clear_log_button)
@@ -321,6 +332,7 @@ class MainWindow(QMainWindow):
         # Control buttons
         self.open_folder_button.clicked.connect(self._on_open_folder)
         self.transcribe_button.clicked.connect(self._on_transcribe_clicked)
+        self.proofread_button.clicked.connect(self._on_proofread_clicked)
         self.clear_log_button.clicked.connect(self._on_clear_log)
         self.settings_button.clicked.connect(self._on_settings_clicked)
         
@@ -843,39 +855,172 @@ class MainWindow(QMainWindow):
             self._log(f"✗ Failed to save transcript")
     
     @pyqtSlot()
+    def _on_proofread_clicked(self) -> None:
+        """Handle proofread button click - select and proofread transcript files."""
+        # Check if API key is configured
+        if not self.proofreader.has_api_key():
+            reply = QMessageBox.question(
+                self,
+                "OpenRouter API Key Required",
+                "Proofreading requires an OpenRouter API key.\n\n"
+                "Would you like to configure it now?\n\n"
+                "(Get a key at openrouter.ai)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._on_settings_clicked()
+            return
+        
+        # Open file dialog for transcript selection (multi-select)
+        start_dir = str(self.config.get_output_path())
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Transcript Files to Proofread",
+            start_dir,
+            "Text Files (*.txt);;All Files (*.*)"
+        )
+        
+        if not file_paths:
+            return
+        
+        # Confirm with user
+        file_count = len(file_paths)
+        if file_count > 1:
+            reply = QMessageBox.question(
+                self,
+                "Confirm Bulk Proofreading",
+                f"You selected {file_count} files to proofread.\n\n"
+                f"Model: {self.proofreader.get_model()}\n\n"
+                "This may take a while and incur API costs. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        
+        # Start proofreading
+        self._log(f"📝 Starting proofreading: {file_count} file(s)")
+        self.proofread_button.setEnabled(False)
+        self.proofread_button.setText("Proofreading...")
+        
+        from PyQt6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+        
+        # Process files
+        success_count = 0
+        fail_count = 0
+        
+        for i, file_path in enumerate(file_paths, 1):
+            file_name = Path(file_path).name
+            self._log(f"  Processing {i}/{file_count}: {file_name}")
+            QCoreApplication.processEvents()
+            
+            result = self.proofreader.proofread_file(
+                file_path,
+                progress_callback=lambda msg: (self._log(f"    {msg}"), QCoreApplication.processEvents())
+            )
+            
+            if "error" in result:
+                self._log(f"  ✗ Failed: {result['error']}")
+                fail_count += 1
+            else:
+                output_path = Path(result.get("output_path", ""))
+                self._log(f"  ✓ Saved: {output_path.name}")
+                if result.get("summary"):
+                    # Log summary briefly
+                    summary_lines = result["summary"].strip().split("\n")
+                    for line in summary_lines[:4]:  # First 4 lines of summary
+                        self._log(f"    {line.strip()}")
+                success_count += 1
+        
+        # Re-enable button
+        self.proofread_button.setText("📝 Proofread")
+        self.proofread_button.setEnabled(True)
+        
+        # Show summary
+        if file_count == 1:
+            if success_count == 1:
+                # Show detailed result for single file
+                result = self.proofreader.proofread_file(file_paths[0])  # Already processed, just get result
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Proofreading Complete")
+                msg_box.setText(f"Edited transcript saved!\n\nModel: {self.proofreader.get_model()}")
+                if result.get("summary"):
+                    msg_box.setDetailedText(result["summary"])
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+                msg_box.exec()
+        else:
+            # Bulk summary
+            self._log(f"📝 Proofreading complete: {success_count} succeeded, {fail_count} failed")
+            QMessageBox.information(
+                self,
+                "Bulk Proofreading Complete",
+                f"Processed {file_count} files:\n\n"
+                f"✓ Succeeded: {success_count}\n"
+                f"✗ Failed: {fail_count}\n\n"
+                f"Edited files saved with '-Edited.md' suffix."
+            )
+    
+    @pyqtSlot()
     def _on_settings_clicked(self) -> None:
         """Show settings dialog."""
         from PyQt6.QtWidgets import QDialog, QFormLayout, QDialogButtonBox
         
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.setMinimumWidth(400)
+        dialog.setMinimumWidth(450)
         
         layout = QFormLayout(dialog)
         
-        # Groq API Key
-        api_key_input = QLineEdit()
-        api_key_input.setPlaceholderText("Enter your Groq API key")
-        api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        current_key = self.config.get("groq_api_key", "")
-        if current_key:
-            api_key_input.setText(current_key)
-        layout.addRow("Groq API Key:", api_key_input)
+        # === Groq API Key (Transcription) ===
+        layout.addRow(QLabel("<b>Transcription (Groq Whisper)</b>"))
         
-        # Show/hide key button
-        show_key_btn = QPushButton("Show")
-        show_key_btn.setCheckable(True)
-        show_key_btn.toggled.connect(
-            lambda checked: api_key_input.setEchoMode(
-                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-            )
-        )
-        layout.addRow("", show_key_btn)
+        groq_key_input = QLineEdit()
+        groq_key_input.setPlaceholderText("Enter your Groq API key")
+        groq_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        current_groq_key = self.config.get("groq_api_key", "")
+        if current_groq_key:
+            groq_key_input.setText(current_groq_key)
+        layout.addRow("Groq API Key:", groq_key_input)
         
-        # Help text
-        help_label = QLabel('<a href="https://console.groq.com/keys">Get free API key from Groq</a>')
-        help_label.setOpenExternalLinks(True)
-        layout.addRow("", help_label)
+        groq_help = QLabel('<a href="https://console.groq.com/keys">Get free Groq API key</a>')
+        groq_help.setOpenExternalLinks(True)
+        layout.addRow("", groq_help)
+        
+        # === OpenRouter API Key (Proofreading) ===
+        layout.addRow(QLabel(""))  # Spacer
+        layout.addRow(QLabel("<b>Proofreading (OpenRouter)</b>"))
+        
+        openrouter_key_input = QLineEdit()
+        openrouter_key_input.setPlaceholderText("Enter your OpenRouter API key")
+        openrouter_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        current_openrouter_key = self.config.get("openrouter_api_key", "")
+        if current_openrouter_key:
+            openrouter_key_input.setText(current_openrouter_key)
+        layout.addRow("OpenRouter Key:", openrouter_key_input)
+        
+        # Model selection
+        model_combo = QComboBox()
+        model_combo.addItems(self.proofreader.get_available_models())
+        current_model = self.config.get("proofreader_model", "claude-3.5-sonnet")
+        index = model_combo.findText(current_model)
+        if index >= 0:
+            model_combo.setCurrentIndex(index)
+        layout.addRow("Proofreader Model:", model_combo)
+        
+        openrouter_help = QLabel('<a href="https://openrouter.ai/keys">Get OpenRouter API key</a>')
+        openrouter_help.setOpenExternalLinks(True)
+        layout.addRow("", openrouter_help)
+        
+        # Show/hide keys button
+        show_keys_btn = QPushButton("Show Keys")
+        show_keys_btn.setCheckable(True)
+        def toggle_key_visibility(checked):
+            mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            groq_key_input.setEchoMode(mode)
+            openrouter_key_input.setEchoMode(mode)
+            show_keys_btn.setText("Hide Keys" if checked else "Show Keys")
+        show_keys_btn.toggled.connect(toggle_key_visibility)
+        layout.addRow("", show_keys_btn)
         
         # Buttons
         buttons = QDialogButtonBox(
@@ -886,16 +1031,32 @@ class MainWindow(QMainWindow):
         layout.addRow(buttons)
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            api_key = api_key_input.text().strip()
-            if api_key:
-                self.config.set("groq_api_key", api_key)
-                self.transcriber.set_groq_api_key(api_key)
-                self._log("✓ Groq API key saved")
-            elif current_key:
-                # Key was cleared
-                self.config.set("groq_api_key", "")
-                self.transcriber.set_groq_api_key("")
-                self._log("ℹ Groq API key removed")
+            # Save Groq key
+            groq_key = groq_key_input.text().strip()
+            if groq_key != current_groq_key:
+                self.config.set("groq_api_key", groq_key)
+                self.transcriber.set_groq_api_key(groq_key)
+                if groq_key:
+                    self._log("✓ Groq API key saved")
+                else:
+                    self._log("ℹ Groq API key removed")
+            
+            # Save OpenRouter key
+            openrouter_key = openrouter_key_input.text().strip()
+            if openrouter_key != current_openrouter_key:
+                self.config.set("openrouter_api_key", openrouter_key)
+                self.proofreader.set_api_key(openrouter_key)
+                if openrouter_key:
+                    self._log("✓ OpenRouter API key saved")
+                else:
+                    self._log("ℹ OpenRouter API key removed")
+            
+            # Save model selection
+            selected_model = model_combo.currentText()
+            if selected_model != current_model:
+                self.config.set("proofreader_model", selected_model)
+                self.proofreader.set_model(selected_model)
+                self._log(f"✓ Proofreader model set to {selected_model}")
     
     def _log(self, message: str) -> None:
         """Add a message to the log area."""

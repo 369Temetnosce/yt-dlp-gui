@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2025-12-23
+
+### Added
+- **AI-Powered Proofreading**
+  - OpenRouter LLM integration (Claude 3.5 Sonnet, GPT-4o, and more)
+  - Automatic chunking for large transcripts (any length supported)
+  - Grammar, spelling, and punctuation correction
+  - Filler word removal (um, uh, you know)
+  - Sponsor segment and off-topic content removal
+  - Output as clean Markdown file (`-Edited.md` suffix)
+  - Bulk proofreading - select multiple files at once
+  - Customizable proofreading rules via `proofreader.txt`
+
+- **Settings Enhancements**
+  - OpenRouter API key configuration
+  - Proofreader model selection dropdown
+  - Show/Hide keys toggle
+
+### Fixed
+- Model selection now persists correctly from config on startup
+
 ## [0.1.0] - 2025-12-21
 
 ### Added
@@ -48,6 +69,6 @@ All notable changes to this project will be documented in this file.
 - Comprehensive logging to app.log
 
 ## Upcoming
-- Web version for Railway deployment
+- Web version (Streamlit + Railway deployment with cookie upload support)
 - Batch download support
 - Playlist support

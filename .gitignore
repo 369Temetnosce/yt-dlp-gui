@@ -73,6 +73,7 @@ Thumbs.db
 # Project specific
 *.log
 config.json
+.api_keys
 
 # Downloaded files (don't commit test downloads)
 downloads/
